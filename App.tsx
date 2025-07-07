@@ -1,6 +1,6 @@
 /**
  * YouTube Alarm App
- * 유튜브 영상을 알람으로 사용하는 앱 (백그라운드 알람 지원)
+ * 유튜브 영상을 알람으로 사용하는 앱 (개선된 백그라운드 지원)
  */
 
 import React, { useState, useEffect, useRef } from 'react';
@@ -21,7 +21,6 @@ import {
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { WebView } from 'react-native-webview';
-import PushNotification from 'react-native-push-notification';
 
 const { width, height } = Dimensions.get('window');
 
@@ -38,56 +37,43 @@ function App(): JSX.Element {
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentVolume, setCurrentVolume] = useState(1);
   const [playbackStartTime, setPlaybackStartTime] = useState<Date | null>(null);
+  const [nextAlarmTime, setNextAlarmTime] = useState<string>('');
   
   const webViewRef = useRef<WebView>(null);
   const volumeIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const stopIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const alarmCheckIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const appStateRef = useRef(AppState.currentState);
 
-  // 푸시 알림 초기화
+  // 앱 시작 시 저장된 데이터 로드
   useEffect(() => {
-    PushNotification.configure({
-      onNotification: function(notification) {
-        console.log('알림 수신:', notification);
-        
-        if (notification.userInteraction) {
-          // 사용자가 알림을 탭했을 때
-          handleAlarmTrigger();
-        }
-      },
-      requestPermissions: Platform.OS === 'ios',
-    });
-
-    // 기존 알림 모두 취소
-    PushNotification.cancelAllLocalNotifications();
-    
     loadAlarmData();
     startAlarmCheck();
+    
+    // 앱 상태 변화 감지
+    const subscription = AppState.addEventListener('change', handleAppStateChange);
     
     return () => {
       if (volumeIntervalRef.current) clearInterval(volumeIntervalRef.current);
       if (stopIntervalRef.current) clearInterval(stopIntervalRef.current);
       if (alarmCheckIntervalRef.current) clearInterval(alarmCheckIntervalRef.current);
+      subscription?.remove();
     };
   }, []);
 
-  // 앱 상태 변화 감지
-  useEffect(() => {
-    const handleAppStateChange = (nextAppState: string) => {
-      if (nextAppState === 'background' && isAlarmEnabled) {
-        scheduleLocalNotification();
-      }
-    };
+  // 앱 상태 변화 처리
+  const handleAppStateChange = (nextAppState: string) => {
+    if (appStateRef.current.match(/inactive|background/) && nextAppState === 'active') {
+      // 앱이 포그라운드로 돌아왔을 때 알람 체크 재시작
+      console.log('앱이 포그라운드로 돌아옴 - 알람 체크 재시작');
+      startAlarmCheck();
+    }
+    appStateRef.current = nextAppState;
+  };
 
-    const subscription = AppState.addEventListener('change', handleAppStateChange);
-    return () => subscription?.remove();
-  }, [isAlarmEnabled, alarmTime]);
-
-  // 로컬 알림 스케줄링
-  const scheduleLocalNotification = () => {
-    if (!isAlarmEnabled || !alarmTime) return;
-
-    const [hours, minutes] = alarmTime.split(':').map(Number);
+  // 다음 알람 시간 계산
+  const calculateNextAlarmTime = (timeString: string): Date => {
+    const [hours, minutes] = timeString.split(':').map(Number);
     const now = new Date();
     const alarmDate = new Date();
     alarmDate.setHours(hours, minutes, 0, 0);
@@ -97,45 +83,7 @@ function App(): JSX.Element {
       alarmDate.setDate(alarmDate.getDate() + 1);
     }
 
-    // 기존 알림 취소
-    PushNotification.cancelAllLocalNotifications();
-
-    // 새 알림 스케줄
-    PushNotification.localNotificationSchedule({
-      title: "YouTube Alarm",
-      message: "알람 시간입니다! 탭해서 음악을 재생하세요.",
-      date: alarmDate,
-      soundName: 'default',
-      vibrate: true,
-      vibration: 300,
-      playSound: true,
-      importance: 'high',
-      priority: 'high',
-      allowWhileIdle: true,
-      ignoreInForeground: false,
-    });
-
-    console.log(`알람이 ${alarmDate.toLocaleString()}에 설정되었습니다.`);
-  };
-
-  // 알람 트리거 처리
-  const handleAlarmTrigger = () => {
-    if (!youtubeUrl) {
-      Alert.alert('오류', 'YouTube URL이 설정되지 않았습니다.');
-      return;
-    }
-
-    setIsPlaying(true);
-    setCurrentVolume(1);
-    setPlaybackStartTime(new Date());
-    
-    // 볼륨 점진적 증가
-    startVolumeIncrease();
-    
-    // 10분 후 자동 정지
-    stopIntervalRef.current = setTimeout(() => {
-      stopAlarm();
-    }, 10 * 60 * 1000);
+    return alarmDate;
   };
 
   // 저장된 알람 데이터 로드
@@ -147,6 +95,11 @@ function App(): JSX.Element {
         setYoutubeUrl(data.youtubeUrl);
         setAlarmTime(data.alarmTime);
         setIsAlarmEnabled(data.isEnabled);
+        
+        if (data.isEnabled) {
+          const nextAlarm = calculateNextAlarmTime(data.alarmTime);
+          setNextAlarmTime(nextAlarm.toLocaleString());
+        }
       }
     } catch (error) {
       console.error('데이터 로드 실패:', error);
@@ -164,10 +117,15 @@ function App(): JSX.Element {
       await AsyncStorage.setItem('alarmData', JSON.stringify(data));
       
       if (isAlarmEnabled) {
-        scheduleLocalNotification();
-        Alert.alert('알람 저장됨', `${alarmTime}에 알람이 설정되었습니다.\n앱이 백그라운드에 있어도 알림이 표시됩니다.`);
+        const nextAlarm = calculateNextAlarmTime(alarmTime);
+        setNextAlarmTime(nextAlarm.toLocaleString());
+        
+        Alert.alert(
+          '알람 저장됨', 
+          `${alarmTime}에 알람이 설정되었습니다.\n\n⚠️ 중요: 백그라운드에서 알람이 작동하려면:\n1. 설정 > 앱 > YouTube Alarm\n2. 배터리 > 백그라운드 앱 새로고침 허용\n3. 앱을 완전히 종료하지 마세요 (홈 버튼 사용)`
+        );
       } else {
-        PushNotification.cancelAllLocalNotifications();
+        setNextAlarmTime('');
         Alert.alert('알람 해제됨', '알람이 해제되었습니다.');
       }
     } catch (error) {
@@ -176,18 +134,53 @@ function App(): JSX.Element {
     }
   };
 
-  // 알람 시간 체크 (포그라운드용)
+  // 알람 시간 체크
   const startAlarmCheck = () => {
+    // 기존 인터벌 정리
+    if (alarmCheckIntervalRef.current) {
+      clearInterval(alarmCheckIntervalRef.current);
+    }
+
     alarmCheckIntervalRef.current = setInterval(() => {
       if (!isAlarmEnabled) return;
 
       const now = new Date();
       const [hours, minutes] = alarmTime.split(':').map(Number);
       
-      if (now.getHours() === hours && now.getMinutes() === minutes && now.getSeconds() === 0) {
+      // 정확한 시간에 알람 실행 (초는 0-5초 사이)
+      if (now.getHours() === hours && now.getMinutes() === minutes && now.getSeconds() <= 5) {
+        console.log('알람 시간 도달!');
         handleAlarmTrigger();
       }
-    }, 1000);
+    }, 1000); // 1초마다 체크
+  };
+
+  // 알람 트리거 처리
+  const handleAlarmTrigger = () => {
+    if (!youtubeUrl) {
+      Alert.alert('오류', 'YouTube URL이 설정되지 않았습니다.');
+      return;
+    }
+
+    // 중복 실행 방지
+    if (isPlaying) return;
+
+    console.log('알람 실행 시작');
+    setIsPlaying(true);
+    setCurrentVolume(1);
+    setPlaybackStartTime(new Date());
+    
+    // 볼륨 점진적 증가
+    startVolumeIncrease();
+    
+    // 10분 후 자동 정지
+    stopIntervalRef.current = setTimeout(() => {
+      stopAlarm();
+    }, 10 * 60 * 1000);
+
+    // 다음 알람 시간 업데이트
+    const nextAlarm = calculateNextAlarmTime(alarmTime);
+    setNextAlarmTime(nextAlarm.toLocaleString());
   };
 
   // 볼륨 점진적 증가
@@ -204,6 +197,8 @@ function App(): JSX.Element {
           action: 'setVolume',
           volume: volumeLevel
         }));
+        
+        console.log(`볼륨 증가: ${volume}/8`);
       } else {
         if (volumeIntervalRef.current) {
           clearInterval(volumeIntervalRef.current);
@@ -214,6 +209,7 @@ function App(): JSX.Element {
 
   // 알람 정지
   const stopAlarm = () => {
+    console.log('알람 정지');
     setIsPlaying(false);
     setCurrentVolume(1);
     setPlaybackStartTime(null);
@@ -239,6 +235,20 @@ function App(): JSX.Element {
     }
     
     handleAlarmTrigger();
+  };
+
+  // 백그라운드 설정 안내
+  const showBackgroundGuide = () => {
+    Alert.alert(
+      '백그라운드 실행 설정',
+      '알람이 백그라운드에서 작동하려면:\n\n' +
+      '1. 설정 > 앱 > YouTube Alarm\n' +
+      '2. 배터리 > 백그라운드 앱 새로고침 허용\n' +
+      '3. 알림 권한 허용\n' +
+      '4. 앱을 완전히 종료하지 마세요\n\n' +
+      '⚠️ 일부 기기에서는 "배터리 최적화 제외" 설정도 필요할 수 있습니다.',
+      [{ text: '확인' }]
+    );
   };
 
   // YouTube URL에서 비디오 ID 추출
@@ -357,6 +367,13 @@ function App(): JSX.Element {
           </View>
         </View>
 
+        {nextAlarmTime && (
+          <View style={styles.alarmInfoContainer}>
+            <Text style={styles.alarmInfoTitle}>다음 알람</Text>
+            <Text style={styles.alarmInfoTime}>{nextAlarmTime}</Text>
+          </View>
+        )}
+
         <View style={styles.buttonContainer}>
           <TouchableOpacity style={styles.button} onPress={saveAlarmData}>
             <Text style={styles.buttonText}>알람 저장</Text>
@@ -364,6 +381,10 @@ function App(): JSX.Element {
           
           <TouchableOpacity style={[styles.button, styles.testButton]} onPress={testPlay}>
             <Text style={styles.buttonText}>테스트 재생</Text>
+          </TouchableOpacity>
+          
+          <TouchableOpacity style={[styles.button, styles.guideButton]} onPress={showBackgroundGuide}>
+            <Text style={styles.buttonText}>백그라운드 설정 가이드</Text>
           </TouchableOpacity>
           
           {isPlaying && (
@@ -458,6 +479,22 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     alignItems: 'center',
   },
+  alarmInfoContainer: {
+    padding: 20,
+    backgroundColor: '#e3f2fd',
+    alignItems: 'center',
+  },
+  alarmInfoTitle: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#1976d2',
+    marginBottom: 5,
+  },
+  alarmInfoTime: {
+    fontSize: 18,
+    fontWeight: 'bold',
+    color: '#1976d2',
+  },
   buttonContainer: {
     padding: 20,
     gap: 12,
@@ -470,6 +507,9 @@ const styles = StyleSheet.create({
   },
   testButton: {
     backgroundColor: '#34C759',
+  },
+  guideButton: {
+    backgroundColor: '#FF9500',
   },
   stopButton: {
     backgroundColor: '#FF3B30',

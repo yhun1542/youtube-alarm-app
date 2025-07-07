@@ -4,21 +4,13 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     
-    <!-- 알람 및 백그라운드 실행 권한 -->
+    <!-- 백그라운드 실행 및 알람 권한 -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.VIBRATE" />
-    <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
-    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
-    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-    
-    <!-- 백그라운드 앱 새로고침 권한 -->
-    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
-    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     
     <!-- 오디오 재생 권한 -->
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
-    <uses-permission android:name="android.permission.RECORD_AUDIO" />
 
     <application
       android:name=".MainApplication"
@@ -36,37 +28,12 @@
         android:launchMode="singleTop"
         android:theme="@style/AppTheme"
         android:windowSoftInputMode="adjustResize"
-        android:screenOrientation="portrait"
-        android:showWhenLocked="true"
-        android:turnScreenOn="true">
+        android:screenOrientation="portrait">
         <intent-filter>
             <action android:name="android.intent.action.MAIN" />
             <category android:name="android.intent.category.LAUNCHER" />
         </intent-filter>
       </activity>
-      
-      <!-- 알림 서비스 -->
-      <service
-        android:name="com.dieam.reactnativepushnotification.modules.RNPushNotificationListenerService"
-        android:exported="false" >
-        <intent-filter>
-            <action android:name="com.google.firebase.MESSAGING_EVENT" />
-        </intent-filter>
-      </service>
-      
-      <!-- 부팅 완료 시 알람 복원 -->
-      <receiver android:name="com.dieam.reactnativepushnotification.modules.RNPushNotificationBootEventReceiver">
-        <intent-filter>
-            <action android:name="android.intent.action.BOOT_COMPLETED" />
-            <action android:name="android.intent.action.QUICKBOOT_POWERON" />
-            <action android:name="com.htc.intent.action.QUICKBOOT_POWERON"/>
-            <category android:name="android.intent.category.DEFAULT" />
-        </intent-filter>
-      </receiver>
-      
-      <!-- 알림 수신기 -->
-      <receiver android:name="com.dieam.reactnativepushnotification.modules.RNPushNotificationPublisher" />
-      <receiver android:name="com.dieam.reactnativepushnotification.modules.RNPushNotificationActions" />
       
     </application>
 </manifest>
