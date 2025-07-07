@@ -1,6 +1,6 @@
 /**
  * YouTube Alarm App
- * 유튜브 영상을 알람으로 사용하는 앱
+ * 유튜브 영상을 알람으로 사용하는 앱 (백그라운드 알람 지원)
  */
 
 import React, { useState, useEffect, useRef } from 'react';
@@ -16,9 +16,12 @@ import {
   Alert,
   Switch,
   Dimensions,
+  AppState,
+  Platform,
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { WebView } from 'react-native-webview';
+import PushNotification from 'react-native-push-notification';
 
 const { width, height } = Dimensions.get('window');
 
@@ -41,30 +44,112 @@ function App(): JSX.Element {
   const stopIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const alarmCheckIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
-  // 앱 시작 시 저장된 데이터 로드
+  // 푸시 알림 초기화
   useEffect(() => {
+    PushNotification.configure({
+      onNotification: function(notification) {
+        console.log('알림 수신:', notification);
+        
+        if (notification.userInteraction) {
+          // 사용자가 알림을 탭했을 때
+          handleAlarmTrigger();
+        }
+      },
+      requestPermissions: Platform.OS === 'ios',
+    });
+
+    // 기존 알림 모두 취소
+    PushNotification.cancelAllLocalNotifications();
+    
     loadAlarmData();
     startAlarmCheck();
     
     return () => {
       if (volumeIntervalRef.current) clearInterval(volumeIntervalRef.current);
-      if (stopIntervalRef.current) clearTimeout(stopIntervalRef.current);
+      if (stopIntervalRef.current) clearInterval(stopIntervalRef.current);
       if (alarmCheckIntervalRef.current) clearInterval(alarmCheckIntervalRef.current);
     };
   }, []);
 
-  // 알람 데이터 로드
+  // 앱 상태 변화 감지
+  useEffect(() => {
+    const handleAppStateChange = (nextAppState: string) => {
+      if (nextAppState === 'background' && isAlarmEnabled) {
+        scheduleLocalNotification();
+      }
+    };
+
+    const subscription = AppState.addEventListener('change', handleAppStateChange);
+    return () => subscription?.remove();
+  }, [isAlarmEnabled, alarmTime]);
+
+  // 로컬 알림 스케줄링
+  const scheduleLocalNotification = () => {
+    if (!isAlarmEnabled || !alarmTime) return;
+
+    const [hours, minutes] = alarmTime.split(':').map(Number);
+    const now = new Date();
+    const alarmDate = new Date();
+    alarmDate.setHours(hours, minutes, 0, 0);
+
+    // 알람 시간이 현재 시간보다 이전이면 다음 날로 설정
+    if (alarmDate <= now) {
+      alarmDate.setDate(alarmDate.getDate() + 1);
+    }
+
+    // 기존 알림 취소
+    PushNotification.cancelAllLocalNotifications();
+
+    // 새 알림 스케줄
+    PushNotification.localNotificationSchedule({
+      title: "YouTube Alarm",
+      message: "알람 시간입니다! 탭해서 음악을 재생하세요.",
+      date: alarmDate,
+      soundName: 'default',
+      vibrate: true,
+      vibration: 300,
+      playSound: true,
+      importance: 'high',
+      priority: 'high',
+      allowWhileIdle: true,
+      ignoreInForeground: false,
+    });
+
+    console.log(`알람이 ${alarmDate.toLocaleString()}에 설정되었습니다.`);
+  };
+
+  // 알람 트리거 처리
+  const handleAlarmTrigger = () => {
+    if (!youtubeUrl) {
+      Alert.alert('오류', 'YouTube URL이 설정되지 않았습니다.');
+      return;
+    }
+
+    setIsPlaying(true);
+    setCurrentVolume(1);
+    setPlaybackStartTime(new Date());
+    
+    // 볼륨 점진적 증가
+    startVolumeIncrease();
+    
+    // 10분 후 자동 정지
+    stopIntervalRef.current = setTimeout(() => {
+      stopAlarm();
+    }, 10 * 60 * 1000);
+  };
+
+  // 저장된 알람 데이터 로드
   const loadAlarmData = async () => {
     try {
       const savedData = await AsyncStorage.getItem('alarmData');
       if (savedData) {
         const data: AlarmData = JSON.parse(savedData);
-        setYoutubeUrl(data.youtubeUrl || '');
-        setAlarmTime(data.alarmTime || '07:00');
-        setIsAlarmEnabled(data.isEnabled || false);
+        setYoutubeUrl(data.youtubeUrl);
+        setAlarmTime(data.alarmTime);
+        setIsAlarmEnabled(data.isEnabled);
       }
     } catch (error) {
-      console.error('알람 데이터 로드 실패:', error);
+      console.error('데이터 로드 실패:', error);
     }
   };
 
@@ -77,80 +162,54 @@ function App(): JSX.Element {
         isEnabled: isAlarmEnabled,
       };
       await AsyncStorage.setItem('alarmData', JSON.stringify(data));
-      Alert.alert('저장 완료', '알람이 설정되었습니다.');
+      
+      if (isAlarmEnabled) {
+        scheduleLocalNotification();
+        Alert.alert('알람 저장됨', `${alarmTime}에 알람이 설정되었습니다.\n앱이 백그라운드에 있어도 알림이 표시됩니다.`);
+      } else {
+        PushNotification.cancelAllLocalNotifications();
+        Alert.alert('알람 해제됨', '알람이 해제되었습니다.');
+      }
     } catch (error) {
-      console.error('알람 데이터 저장 실패:', error);
+      console.error('데이터 저장 실패:', error);
       Alert.alert('오류', '알람 저장에 실패했습니다.');
     }
   };
 
-  // YouTube URL에서 비디오 ID 추출
-  const extractVideoId = (url: string): string | null => {
-    const regex = /(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/)([^&\n?#]+)/;
-    const match = url.match(regex);
-    return match ? match[1] : null;
-  };
-
-  // YouTube 임베드 URL 생성
-  const getEmbedUrl = (videoId: string): string => {
-    return `https://www.youtube.com/embed/${videoId}?autoplay=1&controls=1&rel=0&showinfo=0&modestbranding=1`;
-  };
-
-  // 알람 시간 체크
+  // 알람 시간 체크 (포그라운드용)
   const startAlarmCheck = () => {
     alarmCheckIntervalRef.current = setInterval(() => {
       if (!isAlarmEnabled) return;
 
       const now = new Date();
-      const currentTime = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}`;
+      const [hours, minutes] = alarmTime.split(':').map(Number);
       
-      if (currentTime === alarmTime && !isPlaying) {
-        triggerAlarm();
+      if (now.getHours() === hours && now.getMinutes() === minutes && now.getSeconds() === 0) {
+        handleAlarmTrigger();
       }
-    }, 1000); // 1초마다 체크
-  };
-
-  // 알람 실행
-  const triggerAlarm = () => {
-    if (!youtubeUrl) {
-      Alert.alert('오류', 'YouTube URL을 설정해주세요.');
-      return;
-    }
-
-    const videoId = extractVideoId(youtubeUrl);
-    if (!videoId) {
-      Alert.alert('오류', '올바른 YouTube URL을 입력해주세요.');
-      return;
-    }
-
-    setIsPlaying(true);
-    setCurrentVolume(1);
-    setPlaybackStartTime(new Date());
-    
-    // 볼륨 점진적 증가 (30초마다)
-    startVolumeIncrease();
-    
-    // 10분 후 자동 정지
-    stopIntervalRef.current = setTimeout(() => {
-      stopAlarm();
-    }, 10 * 60 * 1000); // 10분
+    }, 1000);
   };
 
   // 볼륨 점진적 증가
   const startVolumeIncrease = () => {
+    let volume = 1;
     volumeIntervalRef.current = setInterval(() => {
-      setCurrentVolume(prev => {
-        const newVolume = Math.min(prev + 1, 8);
-        // WebView에 볼륨 변경 메시지 전송
-        if (webViewRef.current) {
-          webViewRef.current.postMessage(JSON.stringify({
-            action: 'setVolume',
-            volume: newVolume / 8 // 0-1 범위로 변환
-          }));
+      if (volume < 8) {
+        volume++;
+        setCurrentVolume(volume);
+        
+        // WebView에 볼륨 조절 명령 전송
+        const volumeLevel = volume / 8; // 0.125 ~ 1.0
+        webViewRef.current?.postMessage(JSON.stringify({
+          action: 'setVolume',
+          volume: volumeLevel
+        }));
+      } else {
+        if (volumeIntervalRef.current) {
+          clearInterval(volumeIntervalRef.current);
         }
-        return newVolume;
-      });
-    }, 30000); // 30초마다
+      }
+    }, 30000); // 30초마다 볼륨 증가
   };
 
   // 알람 정지
@@ -161,52 +220,107 @@ function App(): JSX.Element {
     
     if (volumeIntervalRef.current) {
       clearInterval(volumeIntervalRef.current);
-      volumeIntervalRef.current = null;
     }
-    
     if (stopIntervalRef.current) {
       clearTimeout(stopIntervalRef.current);
-      stopIntervalRef.current = null;
     }
-
-    // WebView에 정지 메시지 전송
-    if (webViewRef.current) {
-      webViewRef.current.postMessage(JSON.stringify({
-        action: 'stop'
-      }));
-    }
+    
+    // WebView 정지
+    webViewRef.current?.postMessage(JSON.stringify({
+      action: 'stop'
+    }));
   };
 
-  // 수동 테스트 재생
-  const testPlayback = () => {
+  // 테스트 재생
+  const testPlay = () => {
     if (!youtubeUrl) {
-      Alert.alert('오류', 'YouTube URL을 설정해주세요.');
+      Alert.alert('오류', 'YouTube URL을 먼저 입력해주세요.');
       return;
     }
-    triggerAlarm();
+    
+    handleAlarmTrigger();
   };
 
-  // WebView 메시지 처리
-  const handleWebViewMessage = (event: any) => {
-    try {
-      const message = JSON.parse(event.nativeEvent.data);
-      console.log('WebView 메시지:', message);
-    } catch (error) {
-      console.error('WebView 메시지 파싱 오류:', error);
-    }
+  // YouTube URL에서 비디오 ID 추출
+  const getYouTubeVideoId = (url: string): string | null => {
+    const regExp = /^.*(youtu.be\/|v\/|u\/\w\/|embed\/|watch\?v=|&v=)([^#&?]*).*/;
+    const match = url.match(regExp);
+    return (match && match[2].length === 11) ? match[2] : null;
   };
 
-  const videoId = extractVideoId(youtubeUrl);
-  const embedUrl = videoId ? getEmbedUrl(videoId) : null;
+  // YouTube 임베드 HTML 생성
+  const getYouTubeEmbedHtml = (videoId: string): string => {
+    return `
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <style>
+            body { margin: 0; padding: 0; background: black; }
+            #player { width: 100%; height: 100vh; }
+        </style>
+    </head>
+    <body>
+        <div id="player"></div>
+        <script>
+            var tag = document.createElement('script');
+            tag.src = "https://www.youtube.com/iframe_api";
+            var firstScriptTag = document.getElementsByTagName('script')[0];
+            firstScriptTag.parentNode.insertBefore(tag, firstScriptTag);
+            
+            var player;
+            function onYouTubeIframeAPIReady() {
+                player = new YT.Player('player', {
+                    height: '100%',
+                    width: '100%',
+                    videoId: '${videoId}',
+                    playerVars: {
+                        'autoplay': 0,
+                        'controls': 1,
+                        'rel': 0,
+                        'showinfo': 0,
+                        'modestbranding': 1
+                    },
+                    events: {
+                        'onReady': onPlayerReady
+                    }
+                });
+            }
+            
+            function onPlayerReady(event) {
+                // 메시지 리스너 설정
+                window.addEventListener('message', function(event) {
+                    try {
+                        var data = JSON.parse(event.data);
+                        if (data.action === 'play') {
+                            player.playVideo();
+                            player.setVolume(12.5); // 초기 볼륨 1/8
+                        } else if (data.action === 'stop') {
+                            player.stopVideo();
+                        } else if (data.action === 'setVolume') {
+                            player.setVolume(data.volume * 100);
+                        }
+                    } catch (e) {
+                        console.log('메시지 파싱 오류:', e);
+                    }
+                });
+            }
+        </script>
+    </body>
+    </html>
+    `;
+  };
+
+  const videoId = getYouTubeVideoId(youtubeUrl);
 
   return (
     <SafeAreaView style={styles.container}>
-      <StatusBar barStyle="dark-content" backgroundColor="#f8f9fa" />
+      <StatusBar barStyle="dark-content" backgroundColor="#ffffff" />
       
       <ScrollView contentInsetAdjustmentBehavior="automatic" style={styles.scrollView}>
         <View style={styles.header}>
           <Text style={styles.title}>YouTube Alarm</Text>
-          <Text style={styles.subtitle}>유튜브 영상으로 알람 설정하기</Text>
+          <Text style={styles.subtitle}>좋아하는 유튜브 영상으로 기상하세요</Text>
         </View>
 
         <View style={styles.section}>
@@ -217,14 +331,13 @@ function App(): JSX.Element {
             onChangeText={setYoutubeUrl}
             placeholder="https://www.youtube.com/watch?v=..."
             placeholderTextColor="#999"
-            multiline
           />
         </View>
 
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>알람 시간</Text>
           <TextInput
-            style={styles.timeInput}
+            style={styles.input}
             value={alarmTime}
             onChangeText={setAlarmTime}
             placeholder="07:00"
@@ -245,16 +358,16 @@ function App(): JSX.Element {
         </View>
 
         <View style={styles.buttonContainer}>
-          <TouchableOpacity style={styles.saveButton} onPress={saveAlarmData}>
+          <TouchableOpacity style={styles.button} onPress={saveAlarmData}>
             <Text style={styles.buttonText}>알람 저장</Text>
           </TouchableOpacity>
           
-          <TouchableOpacity style={styles.testButton} onPress={testPlayback}>
+          <TouchableOpacity style={[styles.button, styles.testButton]} onPress={testPlay}>
             <Text style={styles.buttonText}>테스트 재생</Text>
           </TouchableOpacity>
           
           {isPlaying && (
-            <TouchableOpacity style={styles.stopButton} onPress={stopAlarm}>
+            <TouchableOpacity style={[styles.button, styles.stopButton]} onPress={stopAlarm}>
               <Text style={styles.buttonText}>정지</Text>
             </TouchableOpacity>
           )}
@@ -262,54 +375,33 @@ function App(): JSX.Element {
 
         {isPlaying && (
           <View style={styles.statusContainer}>
-            <Text style={styles.statusText}>🎵 재생 중...</Text>
-            <Text style={styles.volumeText}>볼륨: {currentVolume}/8</Text>
+            <Text style={styles.statusText}>재생 중... 볼륨: {currentVolume}/8</Text>
             {playbackStartTime && (
-              <Text style={styles.timeText}>
+              <Text style={styles.statusText}>
                 시작 시간: {playbackStartTime.toLocaleTimeString()}
               </Text>
             )}
           </View>
         )}
 
-        {isPlaying && embedUrl && (
-          <View style={styles.webViewContainer}>
+        {isPlaying && videoId && (
+          <View style={styles.videoContainer}>
             <WebView
               ref={webViewRef}
-              source={{ uri: embedUrl }}
-              style={styles.webView}
+              source={{ html: getYouTubeEmbedHtml(videoId) }}
+              style={styles.webview}
               javaScriptEnabled={true}
               domStorageEnabled={true}
               allowsInlineMediaPlayback={true}
               mediaPlaybackRequiresUserAction={false}
-              onMessage={handleWebViewMessage}
-              injectedJavaScript={`
-                // 볼륨 제어를 위한 JavaScript
-                window.addEventListener('message', function(event) {
-                  try {
-                    const data = JSON.parse(event.data);
-                    if (data.action === 'setVolume') {
-                      // YouTube iframe API를 통한 볼륨 제어
-                      if (window.YT && window.YT.get) {
-                        const player = window.YT.get('player');
-                        if (player && player.setVolume) {
-                          player.setVolume(data.volume * 100);
-                        }
-                      }
-                    } else if (data.action === 'stop') {
-                      if (window.YT && window.YT.get) {
-                        const player = window.YT.get('player');
-                        if (player && player.pauseVideo) {
-                          player.pauseVideo();
-                        }
-                      }
-                    }
-                  } catch (error) {
-                    console.error('Message handling error:', error);
-                  }
-                });
-                true;
-              `}
+              onLoadEnd={() => {
+                // 로드 완료 후 자동 재생
+                setTimeout(() => {
+                  webViewRef.current?.postMessage(JSON.stringify({
+                    action: 'play'
+                  }));
+                }, 1000);
+              }}
             />
           </View>
         )}
@@ -321,7 +413,7 @@ function App(): JSX.Element {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#f8f9fa',
+    backgroundColor: '#ffffff',
   },
   scrollView: {
     flex: 1,
@@ -329,29 +421,23 @@ const styles = StyleSheet.create({
   header: {
     padding: 20,
     alignItems: 'center',
-    backgroundColor: '#fff',
-    marginBottom: 10,
+    backgroundColor: '#f8f9fa',
   },
   title: {
     fontSize: 28,
     fontWeight: 'bold',
     color: '#333',
-    marginBottom: 5,
+    marginBottom: 8,
   },
   subtitle: {
     fontSize: 16,
     color: '#666',
+    textAlign: 'center',
   },
   section: {
-    backgroundColor: '#fff',
-    margin: 10,
     padding: 20,
-    borderRadius: 10,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 4,
-    elevation: 3,
+    borderBottomWidth: 1,
+    borderBottomColor: '#eee',
   },
   sectionTitle: {
     fontSize: 18,
@@ -365,18 +451,7 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     padding: 12,
     fontSize: 16,
-    backgroundColor: '#f9f9f9',
-    minHeight: 50,
-  },
-  timeInput: {
-    borderWidth: 1,
-    borderColor: '#ddd',
-    borderRadius: 8,
-    padding: 12,
-    fontSize: 18,
-    backgroundColor: '#f9f9f9',
-    textAlign: 'center',
-    fontWeight: '600',
+    backgroundColor: '#fff',
   },
   switchContainer: {
     flexDirection: 'row',
@@ -385,25 +460,19 @@ const styles = StyleSheet.create({
   },
   buttonContainer: {
     padding: 20,
-    gap: 10,
+    gap: 12,
   },
-  saveButton: {
+  button: {
     backgroundColor: '#007AFF',
     padding: 15,
-    borderRadius: 10,
+    borderRadius: 8,
     alignItems: 'center',
   },
   testButton: {
     backgroundColor: '#34C759',
-    padding: 15,
-    borderRadius: 10,
-    alignItems: 'center',
   },
   stopButton: {
     backgroundColor: '#FF3B30',
-    padding: 15,
-    borderRadius: 10,
-    alignItems: 'center',
   },
   buttonText: {
     color: '#fff',
@@ -411,34 +480,22 @@ const styles = StyleSheet.create({
     fontWeight: '600',
   },
   statusContainer: {
-    backgroundColor: '#fff',
-    margin: 10,
     padding: 20,
-    borderRadius: 10,
+    backgroundColor: '#f0f0f0',
     alignItems: 'center',
   },
   statusText: {
-    fontSize: 18,
-    fontWeight: '600',
+    fontSize: 16,
     color: '#333',
     marginBottom: 5,
   },
-  volumeText: {
-    fontSize: 16,
-    color: '#666',
-    marginBottom: 5,
-  },
-  timeText: {
-    fontSize: 14,
-    color: '#999',
-  },
-  webViewContainer: {
-    margin: 10,
-    height: 200,
-    borderRadius: 10,
+  videoContainer: {
+    height: 250,
+    margin: 20,
+    borderRadius: 8,
     overflow: 'hidden',
   },
-  webView: {
+  webview: {
     flex: 1,
   },
 });
